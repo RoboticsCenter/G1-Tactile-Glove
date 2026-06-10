@@ -324,7 +324,7 @@ class GloveReader:
                     except Exception:
                         pass
                     self.ser = None
-                time.sleep(1.0)
+                time.sleep(0.25)
 
 
 def load_calibration(side: str) -> Dict[str, Any]:
@@ -752,7 +752,8 @@ class DemoRecorder:
 
 class ViewerApp:
     # Hot-plug watcher tuning.
-    WATCH_INTERVAL = 2.5   # seconds between scans
+    WATCH_INTERVAL = 2.5       # seconds between scans when all gloves are live
+    WATCH_INTERVAL_FAST = 0.5  # faster scan rate while waiting for a glove to reappear
     PROBE_SEC = 2.0        # how long to listen on a candidate port (match probe_glove_ports.py)
     PROBE_SEC_BT = 4.0     # BT dongles (/dev/cu.usbmodem-*) often need longer to start streaming
     NEG_COOLDOWN = 20.0    # re-probe a port that opened but had no glove only this often
@@ -818,7 +819,9 @@ class ViewerApp:
                 self._scan_once()
             except Exception as exc:  # never let the watcher die
                 print(f"[viewer] watcher scan error (continuing): {exc}")
-            time.sleep(self.WATCH_INTERVAL)
+            with self._readers_lock:
+                all_ok = bool(self.readers) and all(r.is_online() for r in self.readers.values())
+            time.sleep(self.WATCH_INTERVAL if all_ok else self.WATCH_INTERVAL_FAST)
 
     @classmethod
     def _should_probe_port(cls, dev: str) -> bool:
@@ -1998,17 +2001,29 @@ function buildModel(side, template){
   baseOrient.quaternion.copy(_by).multiply(_bx);
   const pivot=new THREE.Group();         // IMU orientation is applied here
   pivot.add(baseOrient);
-  return {pivot, baseOrient, hand, bones, side};
+  // Capture each finger bone's rest-pose quaternion so applyBends can rotate
+  // relative to the rest pose rather than writing absolute Euler z — this avoids
+  // the "snap to straight" that occurs when direct rotation.z conflicts with the
+  // bone's baked GLB orientation at larger bend angles.
+  const restQuats={};
+  for(const fname in FINGER_BONES){
+    restQuats[fname]=FINGER_BONES[fname].map(bname=>
+      bones[bname]?bones[bname].quaternion.clone():new THREE.Quaternion()
+    );
+  }
+  return {pivot, baseOrient, hand, bones, side, restQuats};
 }
 
 function applyBends(model, bends){
-  if(!model||!model.bones) return;
+  if(!model||!model.bones||!model.restQuats) return;
   for(const fname in FINGER_BONES){
     const v=clamp01(bends[fname]);
     const segs=FINGER_BONES[fname];
+    const rqs=model.restQuats[fname];
+    _qCurl.setFromAxisAngle(_vCurlAxis,-CURL*v);
     for(let i=0;i<segs.length;i++){
       const b=model.bones[segs[i]];
-      if(b) b.rotation.z=-CURL*v;
+      if(b) b.quaternion.copy(rqs[i]).multiply(_qCurl);
     }
   }
 }
@@ -2062,6 +2077,7 @@ function ensureSize(ctx){
   return true;
 }
 const _qRaw=new THREE.Quaternion(), _qRef=new THREE.Quaternion();
+const _qCurl=new THREE.Quaternion(), _vCurlAxis=new THREE.Vector3(0,0,1);
 function render(ctx, quat, bends, ref){
   ctx._last.quat=quat||null; ctx._last.bends=bends||{}; ctx._last.ref=ref||null;
   const m=ctx.model;

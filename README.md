@@ -42,30 +42,60 @@ G1-Tactile-Glove/
 
 ## Quick start
 
-### macOS
+### Step 1 — Get the files
+
+**macOS (Terminal):**
+
+```bash
+cd ~
+git clone https://github.com/RoboticsCenter/G1-Tactile-Glove.git
+```
+
+**Windows (PowerShell or Command Prompt):**
+
+```powershell
+cd C:\
+git clone https://github.com/RoboticsCenter/G1-Tactile-Glove.git
+```
+
+> Don't have Git? Download it from <https://git-scm.com/downloads>, install it, then
+> reopen your terminal and run the command above.
+
+### Step 2 — Run it
+
+**macOS:**
 
 ```bash
 cd ~/G1-Tactile-Glove
 bash run_macos.sh
 ```
 
-### Windows
-
-Double-click `run_windows.bat`, or from PowerShell:
+**Windows** — double-click `run_windows.bat` inside the `G1-Tactile-Glove` folder, or
+from PowerShell:
 
 ```powershell
 cd C:\G1-Tactile-Glove
 .\run_windows.bat
 ```
 
-Then open **http://127.0.0.1:8877** in your browser. No gloves required — you can
-upload and replay recordings immediately.
+The first run automatically sets up everything (takes ~30 seconds). After that it
+starts instantly.
+
+### Step 3 — Open the UI
+
+Open your browser and go to:
+
+```
+http://127.0.0.1:8877
+```
+
+No gloves required — you can upload and replay recordings immediately.
 
 ---
 
-## Step-by-step setup
+## Prerequisites
 
-### 1. Install Python 3.9+
+### Install Python 3.9+
 
 **macOS** — ships with an old Python; install a current one:
 - From <https://www.python.org/downloads/macos/>, **or**
@@ -83,47 +113,7 @@ python3 --version
 python --version
 ```
 
-### 2. Run it
-
-**macOS:**
-
-```bash
-cd ~/G1-Tactile-Glove
-bash run_macos.sh
-```
-
-On first run this creates a local virtual environment (`.venv`), installs `pyserial`,
-and starts the viewer.
-
-**Manual alternative (macOS):**
-
-```bash
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r requirements.txt
-./.venv/bin/python tactile_glove_viewer.py
-```
-
-**Windows** — double-click `run_windows.bat`. On first run it automatically creates
-`.venv`, installs `pyserial`, and starts the viewer.
-
-**Manual alternative (Windows):**
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe tactile_glove_viewer.py
-```
-
-### 3. Open the UI
-
-```
-http://127.0.0.1:8877
-```
-
-- **macOS:** Safari, Chrome, and Firefox all work.
-- **Windows:** Use Chrome, Edge, or Firefox.
-
-### 4. Connect the gloves (optional, for live data)
+### Connect the gloves (optional, for live data)
 
 **macOS** — gloves appear as `/dev/cu.wchusbserial-XXXX` (CH340 chip) or
 `/dev/cu.usbserial-XXXX`. A Bluetooth dongle shows as `/dev/cu.usbmodem-XXXX`.
@@ -156,7 +146,7 @@ Probe ports directly to see which one streams glove data:
 .\.venv\Scripts\python.exe probe_glove_ports.py
 ```
 
-### 5. Calibrate (recommended before a demo)
+### Calibrate (recommended before a demo)
 
 In the UI:
 1. **Orientation**: hold the hand in the neutral pose — *palm toward front, fingers up* —
@@ -164,7 +154,7 @@ In the UI:
 2. **Finger bends**: **Capture Open** (flat hand) then **Capture Closed** (full fist),
    then **Save to File**. Calibration is saved in `calibration/`.
 
-### 6. Record & replay (no gloves required)
+### Record & replay (no gloves required)
 
 Use the **Demo Recording** panel in the UI:
 

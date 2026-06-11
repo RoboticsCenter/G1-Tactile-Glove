@@ -289,6 +289,11 @@ class GloveReader:
                     vals = [sensor[i - 1] for i in idxs if 1 <= i <= 256]
                     pressure[region] = round((sum(vals) / len(vals)) / 255.0 if vals else 0.0, 4)
                 mat = matrix_from_flat([float(v) for v in sensor[:256]], 16, 16, 0.0)
+                for _c in range(16):
+                    mat[0][_c] = max(mat[0][_c], mat[14][_c])
+                    mat[1][_c] = max(mat[1][_c], mat[15][_c])
+                mat[14] = [0.0] * 16
+                mat[15] = [0.0] * 16
                 bends = apply_calibration(raw_bends, self.cal)
                 fps_count += 1
                 now = time.time()
@@ -2190,19 +2195,6 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"[viewer] Tactile Glove demo running at {url}")
     print("[viewer] Press Ctrl+C to stop")
-    def _open_browser(u: str) -> None:
-        import subprocess, platform
-        time.sleep(1.5)
-        try:
-            if platform.system() == "Darwin":
-                subprocess.Popen(["open", u])
-            elif platform.system() == "Windows":
-                os.startfile(u)  # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(["xdg-open", u])
-        except Exception:
-            pass
-    threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

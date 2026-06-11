@@ -17,24 +17,27 @@ Everything (3D engine, hand model) is bundled locally — **no internet required
 
 ```
 G1-Tactile-Glove/
-  tactile_glove_viewer.py     # main app (HTTP server + browser UI)
-  linker_glove_agent.py       # serial protocol parser + sensor mapping
-  probe_glove_ports.py        # port auto-detection / standalone probe tool
-  bt_dongle.py                # Bluetooth dongle bridge helpers (macOS)
-  connect_bt_dongle.py        # Bluetooth dongle connection utility (macOS)
-  time_utils.py               # timestamp helper
-  assets/                     # bundled 3D engine + hand model (served locally)
+  tactile_glove_viewer.py        # main app — macOS (Shroom rig, BT dongle support)
+  tactile_glove_viewer_win.py    # main app — Windows (anatomical rig)
+  linker_glove_agent.py          # serial protocol parser — macOS
+  linker_glove_agent_win.py      # serial protocol parser — Windows
+  probe_glove_ports.py           # port probe tool — macOS (includes BT dongle probe)
+  probe_glove_ports_win.py       # port probe tool — Windows
+  bt_dongle.py                   # Bluetooth dongle bridge helpers (macOS only)
+  connect_bt_dongle.py           # Bluetooth dongle connection utility (macOS only)
+  time_utils.py                  # timestamp helper (shared)
+  assets/                        # bundled 3D engine + hand models (served locally)
     three.module.js
     GLTFLoader.js
-    shroom_hand1.glb           # hand model (macOS)
-    hand_model.glb             # hand model (Windows)
+    shroom_hand1.glb             # hand model used by macOS viewer
+    hand_model.glb               # hand model used by Windows viewer
     utils/SkeletonUtils.js
     utils/BufferGeometryUtils.js
-  calibration/                # your saved calibration files land here
-  recordings/                 # your saved recordings land here
-  requirements.txt            # one dependency: pyserial
-  run_macos.sh                # one-click launcher (macOS)
-  run_windows.bat             # one-click launcher (Windows)
+  calibration/                   # your saved calibration files land here
+  recordings/                    # your saved recordings land here
+  requirements.txt               # one dependency: pyserial
+  run_macos.sh                   # one-click launcher (macOS)
+  run_windows.bat                # one-click launcher (Windows)
   README.md
 ```
 
@@ -131,7 +134,7 @@ find the numbers.
 
 ```powershell
 # Force specific ports
-.\.venv\Scripts\python.exe tactile_glove_viewer.py --left COM10 --right COM9
+.\.venv\Scripts\python.exe tactile_glove_viewer_win.py --left COM10 --right COM9
 ```
 
 The viewer **auto-detects** ports and hot-plugs them on both platforms. The terminal
@@ -143,7 +146,7 @@ Probe ports directly to see which one streams glove data:
 # macOS
 ./.venv/bin/python probe_glove_ports.py
 # Windows
-.\.venv\Scripts\python.exe probe_glove_ports.py
+.\.venv\Scripts\python.exe probe_glove_ports_win.py
 ```
 
 ### Calibrate (recommended before a demo)
@@ -168,7 +171,7 @@ Use the **Demo Recording** panel in the UI:
 # macOS
 ./.venv/bin/python tactile_glove_viewer.py --replay-only
 # Windows
-.\.venv\Scripts\python.exe tactile_glove_viewer.py --replay-only
+.\.venv\Scripts\python.exe tactile_glove_viewer_win.py --replay-only
 ```
 
 ---

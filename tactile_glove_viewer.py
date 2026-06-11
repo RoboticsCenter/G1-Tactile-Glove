@@ -19,6 +19,7 @@ import struct
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2190,6 +2191,7 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"[viewer] Tactile Glove demo running at {url}")
     print("[viewer] Press Ctrl+C to stop")
+    threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

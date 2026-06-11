@@ -287,6 +287,14 @@ class SharedState:
                 pressure[region] = (sum(vals) / len(vals)) if vals else 0.0
             raw = list(sensor[:256])
             mat16 = matrix_from_flat([float(v) for v in raw], 16, 16, 0.0)
+            # Fingertip sensors appear at both ends of the flat array (hardware
+            # PCB wraps around the hand). Merge rows 14-15 into rows 0-1 so
+            # fingertip pressure shows only at the top of the grid.
+            for _c in range(16):
+                mat16[0][_c] = max(mat16[0][_c], mat16[14][_c])
+                mat16[1][_c] = max(mat16[1][_c], mat16[15][_c])
+            mat16[14] = [0.0] * 16
+            mat16[15] = [0.0] * 16
             self.detected_side = side
             self.bends = bends
             self.pressure = pressure

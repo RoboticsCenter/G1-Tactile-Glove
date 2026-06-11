@@ -19,7 +19,6 @@ import struct
 import sys
 import threading
 import time
-import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2191,7 +2190,19 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"[viewer] Tactile Glove demo running at {url}")
     print("[viewer] Press Ctrl+C to stop")
-    threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    def _open_browser(u: str) -> None:
+        import subprocess, platform
+        time.sleep(1.5)
+        try:
+            if platform.system() == "Darwin":
+                subprocess.Popen(["open", u])
+            elif platform.system() == "Windows":
+                os.startfile(u)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", u])
+        except Exception:
+            pass
+    threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

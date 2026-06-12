@@ -1457,7 +1457,6 @@ let poseCalCache={imu_zeroed:false,imu_ref:null};
 let sessionPose={left:{zeroed:false,saved:false},right:{zeroed:false,saved:false}};
 let sessionBend={left:{open:false,closed:false,saved:false},right:{open:false,closed:false,saved:false}};
 let lastHandFrame={left:-1,right:-1};
-let rowActiveMask={left:null,right:null}; // sticky per-side mask of grid rows that have ever shown pressure
 const LIVE_POLL_MS=33;
 let playback=null, playbackIdx=0, playbackOn=false, playbackPlaying=false;
 let playbackAnchorT=0, playbackWall0=0, recordingsFolder='';
@@ -1563,36 +1562,10 @@ function renderHands(state){
       const bv=document.getElementById(`barv-${side}-${f}`); if(bv) bv.textContent=Math.round(v*100)+'%';
     });
     const mat=d.matrix_16x16||[];
-    // Display copy only (keeps the stored/CSV matrix raw): the sensor grid repeats the
-    // fingertip rows at the bottom, so fold the bottom two rows into the top two and
-    // blank the duplicates, then mirror columns to match the physical hand.
-    const disp=mat.map(row=>Array.isArray(row)?row.slice():new Array(16).fill(0));
-    if(disp.length>=16){
-      for(let c=0;c<16;c++){
-        disp[0][c]=Math.max(disp[0][c]||0,(disp[14]||[])[c]||0);
-        disp[1][c]=Math.max(disp[1][c]||0,(disp[15]||[])[c]||0);
-      }
-      disp[14]=new Array(16).fill(0);
-      disp[15]=new Array(16).fill(0);
-    }
-    // The device only fills part of the 16x16 grid; the rest is empty padding,
-    // and which rows are used differs per hand. Track rows that have ever shown
-    // real pressure (sticky per side) and vertically stretch just those active
-    // rows to fill all 16 display rows, so the heatmap uses the whole grid with
-    // no empty band. Raw data / CSV stay untouched.
-    let mask=rowActiveMask[side]||(rowActiveMask[side]=new Array(16).fill(false));
-    for(let r=0;r<16;r++){const row=disp[r]||[];for(let c=0;c<16;c++){if((row[c]||0)>2){mask[r]=true;break;}}}
-    const activeRows=[]; for(let r=0;r<16;r++) if(mask[r]) activeRows.push(r);
-    let peak=1; disp.forEach(r=>r.forEach(v=>{if(v>peak)peak=v;}));
+    let peak=1; mat.forEach(r=>r.forEach(v=>{if(v>peak)peak=v;}));
     for(let r=0;r<16;r++)for(let c=0;c<16;c++){
       const cell=document.getElementById(`hc-${side}-${r*16+c}`);
-      if(!cell) continue;
-      let val=0;
-      if(activeRows.length){
-        const srcRow=activeRows[Math.min(activeRows.length-1,Math.floor(r*activeRows.length/16))];
-        val=(disp[srcRow]||[])[15-c]||0;
-      }
-      cell.style.background=heatColor(val,peak);
+      if(cell) cell.style.background=heatColor((mat[r]||[])[c]||0,peak);
     }
     if(window.Hand3D){
       if(!window.Hand3D.has(side)) window.Hand3D.init(document.getElementById(`c3d-${side}`), side);

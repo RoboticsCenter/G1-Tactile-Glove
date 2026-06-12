@@ -1,0 +1,3 @@
+# Tactile Glove Demo Viewer — Python dependencies
+# Only one third-party package is required for the viewer.
+pyserial>=3.5

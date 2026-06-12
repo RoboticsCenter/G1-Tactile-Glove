@@ -41,6 +41,6 @@ echo [run] Starting Tactile Glove viewer ...
 echo [run] Open http://127.0.0.1:8877 in your browser.
 echo [run] Press Ctrl+C in this window to stop.
 echo.
-".venv\Scripts\python.exe" tactile_glove_viewer_win.py %*
+".venv\Scripts\python.exe" tactile_glove_viewer.py %*
 
 pause

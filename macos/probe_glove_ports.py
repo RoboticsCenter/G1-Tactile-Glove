@@ -9,13 +9,13 @@ import time
 import serial
 from serial.tools import list_ports
 
-from linker_glove_agent_win import FrameParser, GLOVE_SENSOR_TYPE
+from linker_glove_agent import FrameParser, GLOVE_SENSOR_TYPE
 
 BAUD = 921600
 PROBE_SEC = 2.0
 
 
-def probe_port(port: str, probe_sec: float = PROBE_SEC) -> dict:
+def probe_port(port: str, probe_sec: float = PROBE_SEC, early_frames: int = 3) -> dict:
     parser = FrameParser()
     left = right = 0
     err = ""
@@ -44,6 +44,11 @@ def probe_port(port: str, probe_sec: float = PROBE_SEC) -> dict:
                     left += 1
                 elif st == GLOVE_SENSOR_TYPE["right"]:
                     right += 1
+            # Early-exit: a streaming glove shows up within a few frames, so stop as
+            # soon as we're confident instead of listening the whole window. This is
+            # the main hot-plug latency win (~0.1s vs the full probe_sec timeout).
+            if left + right >= early_frames:
+                break
     except Exception as exc:
         err = str(exc)
     finally:

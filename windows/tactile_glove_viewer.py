@@ -2,7 +2,7 @@
 """
 Tactile Glove local demo viewer (offline, no Fearless backend).
 
-Reads Juqiao serial protocol (AA 55 03 99) from USB COM ports and serves
+Reads tactile glove serial protocol (AA 55 03 99) from USB COM ports and serves
 a browser UI at http://127.0.0.1:8877 with bends, pressure heatmap,
 3D hand pose, calibration, and retarget pose JSON.
 """
@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import json
 import math
 import os
 import re
+import shutil
 import struct
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -87,8 +89,7 @@ def default_calibration() -> Dict[str, Any]:
 
 
 def imu_bytes_to_quat(imu: Any) -> Optional[List[float]]:
-    """Decode the 16 IMU bytes (4x float32 little-endian, w,x,y,z per JQ spec)
-    into a normalized quaternion [w, x, y, z]. Returns None if unusable."""
+    """Decode the 16 IMU bytes (4x float32 little-endian, w,x,y,z). Returns None if unusable."""
     if not imu or len(imu) < 16:
         return None
     try:
@@ -289,11 +290,6 @@ class GloveReader:
                     vals = [sensor[i - 1] for i in idxs if 1 <= i <= 256]
                     pressure[region] = round((sum(vals) / len(vals)) / 255.0 if vals else 0.0, 4)
                 mat = matrix_from_flat([float(v) for v in sensor[:256]], 16, 16, 0.0)
-                for _c in range(16):
-                    mat[0][_c] = max(mat[0][_c], mat[14][_c])
-                    mat[1][_c] = max(mat[1][_c], mat[15][_c])
-                mat[14] = [0.0] * 16
-                mat[15] = [0.0] * 16
                 bends = apply_calibration(raw_bends, self.cal)
                 fps_count += 1
                 now = time.time()
@@ -329,12 +325,12 @@ class GloveReader:
                     except Exception:
                         pass
                     self.ser = None
-                time.sleep(0.25)
+                time.sleep(1.0)
 
 
 def load_calibration(side: str) -> Dict[str, Any]:
     CAL_DIR.mkdir(parents=True, exist_ok=True)
-    for name in (f"tactile_glove_{side}.json", f"juqiao_{side}.json"):
+    for name in (f"tactile_glove_{side}.json",):
         path = CAL_DIR / name
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
@@ -387,27 +383,142 @@ def _recording_meta_from_file(path: Path) -> Dict[str, Any]:
     return meta
 
 
+def _recording_json_path(rec_id: str) -> Optional[Path]:
+    """Resolve a recording id to its JSON file. Supports both the per-session
+    folder layout (recordings/<id>/<id>.json) and the legacy flat layout
+    (recordings/<id>.json)."""
+    stem = _safe_recording_id(rec_id)
+    session = REC_DIR / stem / f"{stem}.json"
+    if session.is_file():
+        return session
+    legacy = REC_DIR / f"{stem}.json"
+    if legacy.is_file():
+        return legacy
+    return None
+
+
 def list_recordings() -> List[Dict[str, Any]]:
     REC_DIR.mkdir(parents=True, exist_ok=True)
+    # Per-session folders (current layout) + any legacy flat files (older saves).
+    paths = list(REC_DIR.glob("*/*.json")) + list(REC_DIR.glob("*.json"))
     out: List[Dict[str, Any]] = []
-    for path in sorted(REC_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for path in sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True):
         out.append(_recording_meta_from_file(path))
     return out
 
 
 def load_recording(rec_id: str) -> Dict[str, Any]:
-    path = REC_DIR / f"{_safe_recording_id(rec_id)}.json"
-    if not path.exists():
+    path = _recording_json_path(rec_id)
+    if path is None:
         raise FileNotFoundError(rec_id)
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def delete_recording(rec_id: str) -> bool:
-    path = REC_DIR / f"{_safe_recording_id(rec_id)}.json"
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
+    stem = _safe_recording_id(rec_id)
+    session_dir = REC_DIR / stem
+    if session_dir.is_dir():
+        shutil.rmtree(session_dir, ignore_errors=True)
+        return True
+    legacy = REC_DIR / f"{stem}.json"
+    if legacy.is_file():
+        legacy.unlink()
+        return True
+    return False
+
+
+# CSV column layout — Shroom-aligned. Per frame: elapsed + absolute time, the
+# per-finger bend proportions (0..1), the peak pressure point across the whole
+# hand, the total pressure summed within each region, the total across the whole
+# hand, the raw 256-point grid, and the IMU quaternion.
+_CSV_REGIONS = list(FINGERS) + ["palm"]
+_CSV_HEADER = (
+    ["frame", "time_s", "time"]
+    + [f"{f}_bend" for f in FINGERS]
+    + ["max_pressure"]
+    + [f"{r}_pressure" for r in _CSV_REGIONS]
+    + ["total_pressure", "data", "quat_w", "quat_x", "quat_y", "quat_z"]
+)
+
+
+def _csv_time_label(created_at: str) -> str:
+    """Filename-safe timestamp like '2026-06-11 01-46-22' (no colons)."""
+    return _session_base_dt(created_at).strftime("%Y-%m-%d %H-%M-%S")
+
+
+def _session_base_dt(created_at: str) -> datetime:
+    try:
+        return datetime.fromisoformat(created_at)
+    except (ValueError, TypeError):
+        return datetime.now()
+
+
+def _shroom_timestamp(base_dt: datetime, t: Any) -> str:
+    """Absolute wall-clock for a frame, Shroom style: 'YYYY/M/D HH:MM:SS:mmm'."""
+    dt = base_dt + timedelta(seconds=float(t or 0.0))
+    return (f"{dt.year}/{dt.month}/{dt.day} "
+            f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}:{dt.microsecond // 1000:03d}")
+
+
+def _flat_grid(hand: Dict[str, Any]) -> List[int]:
+    """Flatten the stored 16x16 matrix back to the raw 256-point array (0-255)."""
+    mat = hand.get("matrix_16x16") or []
+    flat = [int(round(float(v))) for row in mat for v in row]
+    if len(flat) < 256:
+        flat = (flat + [0] * 256)[:256]
+    return flat
+
+
+def _write_hand_csv(path: Path, frames: List[Dict[str, Any]], side: str,
+                    base_dt: datetime) -> int:
+    """Write one CSV for a single hand. Returns the number of data rows written."""
+    rows = 0
+    region_idx = REGION_INDEX_MAP.get(side, {})
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(_CSV_HEADER)
+        for i, frame in enumerate(frames):
+            hand = (frame.get("hands") or {}).get(side)
+            if not isinstance(hand, dict):
+                continue
+            bends = hand.get("bends") or {}
+            grid = _flat_grid(hand)
+            max_p = max(grid) if grid else 0
+            total_p = sum(grid)
+            region_totals = {
+                r: sum(grid[j - 1] for j in region_idx.get(r, []) if 1 <= j <= len(grid))
+                for r in _CSV_REGIONS
+            }
+            quat = imu_bytes_to_quat(hand.get("imu") or []) or ["", "", "", ""]
+            writer.writerow(
+                [i, round(float(frame.get("t", 0.0)), 4),
+                 _shroom_timestamp(base_dt, frame.get("t", 0.0))]
+                + [round(float(bends.get(f, 0.0)), 4) for f in FINGERS]
+                + [max_p]
+                + [region_totals[r] for r in _CSV_REGIONS]
+                + [total_p, json.dumps(grid, separators=(",", ":"))]
+                # Quaternion at full float32 precision (no rounding) — matches the
+                # sensor's native fidelity; orientation accuracy is preserved.
+                + [q if q == "" else float(q) for q in quat]
+            )
+            rows += 1
+    return rows
+
+
+def _write_session_csvs(session_dir: Path, payload: Dict[str, Any]) -> List[str]:
+    """Write one CSV per hand that appears in the recording, named
+    '<side>_<YYYY-MM-DD HH-MM-SS>.csv'. Drops empty (never-present) hands."""
+    frames = payload.get("frames") or []
+    time_label = _csv_time_label(payload.get("created_at") or "")
+    base_dt = _session_base_dt(payload.get("created_at") or "")
+    written: List[str] = []
+    for side in ("left", "right"):
+        csv_path = session_dir / f"{side}_{time_label}.csv"
+        if _write_hand_csv(csv_path, frames, side, base_dt) > 0:
+            written.append(str(csv_path))
+        else:
+            csv_path.unlink(missing_ok=True)  # no data for this hand
+    return written
 
 
 def save_recording_payload(data: Dict[str, Any], filename: str = "") -> Dict[str, Any]:
@@ -418,8 +529,8 @@ def save_recording_payload(data: Dict[str, Any], filename: str = "") -> Dict[str
     if filename:
         safe_name = Path(filename).name
         if re.fullmatch(r"[A-Za-z0-9._-]+\.json", safe_name):
-            existing = REC_DIR / safe_name
-            if existing.exists():
+            existing = _recording_json_path(Path(safe_name).stem)
+            if existing is not None:
                 saved = _recording_meta_from_file(existing)
                 return {
                     "id": saved["id"],
@@ -433,7 +544,10 @@ def save_recording_payload(data: Dict[str, Any], filename: str = "") -> Dict[str
     stem = _safe_recording_id(Path(filename).stem if filename else data.get("label") or f"imported_{stamp}")
     if not stem.startswith("demo_") and not stem.startswith("imported_"):
         stem = f"imported_{stamp}_{stem}"[:120]
-    path = REC_DIR / f"{stem}.json"
+    # One folder per session: recordings/<stem>/ holds the JSON + per-hand CSVs.
+    session_dir = REC_DIR / stem
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / f"{stem}.json"
     duration = float(data.get("duration_s") or (frames[-1].get("t", 0) if frames else 0))
     payload = {
         "schema": data.get("schema") or RECORD_SCHEMA,
@@ -447,7 +561,15 @@ def save_recording_payload(data: Dict[str, Any], filename: str = "") -> Dict[str
     if data.get("imu_ref"):
         payload["imu_ref"] = data["imu_ref"]
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return {"id": path.stem, "path": str(path), "frame_count": len(frames), "duration_s": payload["duration_s"]}
+    csv_files = _write_session_csvs(session_dir, payload)
+    return {
+        "id": path.stem,
+        "path": str(path),
+        "folder": str(session_dir),
+        "csv_files": csv_files,
+        "frame_count": len(frames),
+        "duration_s": payload["duration_s"],
+    }
 
 
 def open_recordings_folder() -> str:
@@ -757,12 +879,11 @@ class DemoRecorder:
 
 class ViewerApp:
     # Hot-plug watcher tuning.
-    WATCH_INTERVAL = 2.5       # seconds between scans when all gloves are live
-    WATCH_INTERVAL_FAST = 0.5  # faster scan rate while waiting for a glove to reappear
+    WATCH_INTERVAL = 1.0   # seconds between scans (cheap: just enumerates ports unless a new one appears)
     PROBE_SEC = 2.0        # how long to listen on a candidate port (match probe_glove_ports.py)
-    PROBE_SEC_BT = 4.0     # BT dongles (/dev/cu.usbmodem-*) often need longer to start streaming
+    PROBE_SEC_BT = 4.0     # BT dongles often need longer to start streaming
     NEG_COOLDOWN = 20.0    # re-probe a port that opened but had no glove only this often
-    BUSY_RETRY = 0.0       # a port we couldn't open (busy/Shroom) is retried every tick
+    BUSY_RETRY = 0.0       # a port we couldn't open (busy) is retried every tick
     _SKIP_PORT_MARKERS = ("Bluetooth-Incoming-Port", "debug-console")
 
     def __init__(self, ports: Dict[str, str]):
@@ -805,7 +926,7 @@ class ViewerApp:
         self._watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
         self._watch_thread.start()
         print(f"[viewer] hot-plug watcher running (scan every {self.WATCH_INTERVAL}s) — "
-              "plug in a glove (or close Shroom to free the COM port) and it goes live automatically")
+              "plug in a glove (or close any app holding the COM port) and it goes live automatically")
         try:
             ports = list(list_ports.comports())
             if ports:
@@ -814,7 +935,7 @@ class ViewerApp:
                     print(f"          {p.device}  ({p.description or 'no description'})")
             else:
                 print("[viewer] NO serial ports detected. If a glove is plugged in but not "
-                      "listed, the USB-serial driver may be missing (e.g. CH340/WCH on macOS).")
+                      "listed, install the USB-serial driver (e.g. CH340) and re-plug.")
         except Exception as exc:
             print(f"[viewer] could not enumerate serial ports: {exc}")
 
@@ -824,9 +945,7 @@ class ViewerApp:
                 self._scan_once()
             except Exception as exc:  # never let the watcher die
                 print(f"[viewer] watcher scan error (continuing): {exc}")
-            with self._readers_lock:
-                all_ok = bool(self.readers) and all(r.is_online() for r in self.readers.values())
-            time.sleep(self.WATCH_INTERVAL if all_ok else self.WATCH_INTERVAL_FAST)
+            time.sleep(self.WATCH_INTERVAL)
 
     @classmethod
     def _should_probe_port(cls, dev: str) -> bool:
@@ -835,8 +954,7 @@ class ViewerApp:
 
     @classmethod
     def _probe_sec_for_port(cls, dev: str) -> float:
-        # USB-serial gloves usually stream immediately; BT dongles (usbmodem) lag after plug-in.
-        if "usbmodem" in dev:
+        if "usbmodem" in dev.lower():
             return cls.PROBE_SEC_BT
         return cls.PROBE_SEC
 
@@ -882,11 +1000,7 @@ class ViewerApp:
                 print(f"[viewer] hot-plug: {side} glove connected on {dev}")
             elif info.get("opened"):
                 # Opened fine but no glove frames — don't keep disturbing this device.
-                mode = info.get("mode", "")
-                extra = ""
-                if info.get("binary_flood") or mode == "bt_dongle":
-                    extra = " [BT dongle: RF may be paired but Juqiao bridge (AT+CONN) not active]"
-                print(f"[viewer] probed {dev}: opened OK but no glove frames{extra} "
+                print(f"[viewer] probed {dev}: opened OK but no glove frames "
                       f"(not a glove, or it isn't streaming). {info.get('error','')}".rstrip())
                 self._probe_cooldown[dev] = now + self.NEG_COOLDOWN
             else:
@@ -1207,7 +1321,7 @@ main{padding:0 32px 32px;display:grid;gap:20px}
     <div class="cal-step" id="step-imu-save" data-i18n="step_imu_save">3 · Save</div>
   </div>
   <ol>
-    <li data-i18n="pose_wiz1">Neutral pose — palm toward front, fingers up → Click Zero Orientation</li>
+    <li data-i18n="pose_wiz1">Neutral pose — palm flat down on a table, fingers forward → Click Zero Orientation</li>
   </ol>
   <div class="panel-row">
     <select id="pose-cal-side" onchange="loadPoseCalPanel()"><option value="left" data-i18n="left">Left</option><option value="right" data-i18n="right">Right</option></select>
@@ -1286,7 +1400,7 @@ const I18N={
   zh:{title:"Robotics Center · 触觉手套演示",subtitle:"Tactile Glove · 实时遥测 · 本地离线演示",live:"直播中",
     pose_cal_title:"手部姿态校准（方向）",pose_cal_desc:"录制前将 3D 手部归零到演示姿势。",
     step_imu_neutral:"1 · 中性姿势",step_imu_zero:"2 · 方向归零",step_imu_save:"3 · 保存",
-    pose_wiz1:"中性姿势 — 掌心朝前、手指向上 → 点击方向归零",
+    pose_wiz1:"中性姿势 — 手掌向下平放在桌面、手指朝前 → 点击方向归零",
     pose_cal_hint:"选择手并在录制前归零方向。",pose_cal_ok:"方向已校准",
     glove_offline:"手套离线 — 请检查连接",
     cal_title:"手指弯曲校准",cal_desc:"校准每只手：张开≈0%，握拳≈100%。",left:"左手",right:"右手",
@@ -1308,7 +1422,7 @@ const I18N={
   en:{title:"Robotics Center · Tactile Glove Demo",subtitle:"Tactile Glove · Live Telemetry · Offline Local Demo",live:"LIVE",
     pose_cal_title:"Hand Pose Calibration (Orientation)",pose_cal_desc:"Zero the 3D hand to your demo pose before recording.",
     step_imu_neutral:"1 · Neutral pose",step_imu_zero:"2 · Zero orientation",step_imu_save:"3 · Save",
-    pose_wiz1:"Neutral pose — palm toward front, fingers up → Click Zero Orientation",
+    pose_wiz1:"Neutral pose — palm flat down on a table, fingers forward → Click Zero Orientation",
     pose_cal_hint:"Select a hand and zero orientation before recording.",pose_cal_ok:"Orientation calibrated",
     glove_offline:"glove offline — check Connection",
     cal_title:"Finger Bend Calibration",cal_desc:"Calibrate each hand so open ≈ 0% and fist ≈ 100%.",left:"Left",right:"Right",
@@ -1343,6 +1457,7 @@ let poseCalCache={imu_zeroed:false,imu_ref:null};
 let sessionPose={left:{zeroed:false,saved:false},right:{zeroed:false,saved:false}};
 let sessionBend={left:{open:false,closed:false,saved:false},right:{open:false,closed:false,saved:false}};
 let lastHandFrame={left:-1,right:-1};
+let rowActiveMask={left:null,right:null}; // sticky per-side mask of grid rows that have ever shown pressure
 const LIVE_POLL_MS=33;
 let playback=null, playbackIdx=0, playbackOn=false, playbackPlaying=false;
 let playbackAnchorT=0, playbackWall0=0, recordingsFolder='';
@@ -1416,7 +1531,7 @@ function heatColor(v,peak){
   return `rgb(${r},${g},${b})`;
 }
 
-// --- IMU quaternion (per JQ spec 5.5.1: 16 bytes = 4x float32 LE, w,x,y,z) ---
+// --- IMU quaternion (16 bytes = 4x float32 LE, w,x,y,z) ---
 function imuToQuat(imu){
   if(!imu||imu.length<16) return null;
   const buf=new ArrayBuffer(16), u8=new Uint8Array(buf);
@@ -1448,11 +1563,36 @@ function renderHands(state){
       const bv=document.getElementById(`barv-${side}-${f}`); if(bv) bv.textContent=Math.round(v*100)+'%';
     });
     const mat=d.matrix_16x16||[];
-    let peak=1; mat.forEach(r=>r.forEach(v=>{if(v>peak)peak=v;}));
+    // Display copy only (keeps the stored/CSV matrix raw): the sensor grid repeats the
+    // fingertip rows at the bottom, so fold the bottom two rows into the top two and
+    // blank the duplicates, then mirror columns to match the physical hand.
+    const disp=mat.map(row=>Array.isArray(row)?row.slice():new Array(16).fill(0));
+    if(disp.length>=16){
+      for(let c=0;c<16;c++){
+        disp[0][c]=Math.max(disp[0][c]||0,(disp[14]||[])[c]||0);
+        disp[1][c]=Math.max(disp[1][c]||0,(disp[15]||[])[c]||0);
+      }
+      disp[14]=new Array(16).fill(0);
+      disp[15]=new Array(16).fill(0);
+    }
+    // The device only fills part of the 16x16 grid; the rest is empty padding,
+    // and which rows are used differs per hand. Track rows that have ever shown
+    // real pressure (sticky per side) and vertically stretch just those active
+    // rows to fill all 16 display rows, so the heatmap uses the whole grid with
+    // no empty band. Raw data / CSV stay untouched.
+    let mask=rowActiveMask[side]||(rowActiveMask[side]=new Array(16).fill(false));
+    for(let r=0;r<16;r++){const row=disp[r]||[];for(let c=0;c<16;c++){if((row[c]||0)>2){mask[r]=true;break;}}}
+    const activeRows=[]; for(let r=0;r<16;r++) if(mask[r]) activeRows.push(r);
+    let peak=1; disp.forEach(r=>r.forEach(v=>{if(v>peak)peak=v;}));
     for(let r=0;r<16;r++)for(let c=0;c<16;c++){
       const cell=document.getElementById(`hc-${side}-${r*16+c}`);
-      const matCol=15-c;
-      if(cell) cell.style.background=heatColor((mat[r]||[])[matCol]||0,peak);
+      if(!cell) continue;
+      let val=0;
+      if(activeRows.length){
+        const srcRow=activeRows[Math.min(activeRows.length-1,Math.floor(r*activeRows.length/16))];
+        val=(disp[srcRow]||[])[15-c]||0;
+      }
+      cell.style.background=heatColor(val,peak);
     }
     if(window.Hand3D){
       if(!window.Hand3D.has(side)) window.Hand3D.init(document.getElementById(`c3d-${side}`), side);
@@ -1930,9 +2070,9 @@ async function copyRetarget(){const r=await fetch('/api/retarget_pose'); const j
 </script>
 <script type="module">
 // True 3D hands via Three.js (bundled locally at /assets, no CDN).
-// Shroom "LeapMotion Basehand" rig (shroom_hand1.glb): one left-hand model is
-// loaded for both sides; the right hand is the same mesh mirrored on X (scale.x=-1),
-// exactly as the Shroom app does. Orientation comes from the IMU quaternion;
+// Anatomical hand rig (hand_model.glb): one left-hand model is
+// loaded for both sides; the right hand is the same mesh mirrored on X (scale.x=-1).
+// Orientation comes from the IMU quaternion;
 // finger curl rotates the named Leap finger bones about their local Z axis.
 import * as THREE from '/assets/three.module.js';
 import { GLTFLoader } from '/assets/GLTFLoader.js';
@@ -1944,7 +2084,7 @@ const REG={};
 // right hand (negative X scale flips winding) still lights correctly.
 const HAND_MAT=new THREE.MeshStandardMaterial({color:0xc9ccd3, roughness:0.62, metalness:0.03, side:THREE.DoubleSide});
 
-// Shroom Leap rig finger->bone map. thumb uses Finger_0x, index 1x, middle 2x,
+// Finger bone map. thumb uses Finger_0x, index 1x, middle 2x,
 // ring 3x, little 4x. Segment 0 = knuckle, 1 = mid, 2 = tip joint.
 const FINGER_BONES={
   thumb:['Finger_01','Finger_02'],
@@ -1953,7 +2093,7 @@ const FINGER_BONES={
   ring:['Finger_30','Finger_31','Finger_32'],
   little:['Finger_40','Finger_41','Finger_42'],
 };
-const CURL=Math.PI/2; // Shroom: bone.rotation.z = -PI/2 * value
+const CURL=Math.PI/2; // bone.rotation.z = -PI/2 * value
 
 function clearHandStatus(side){
   const el=document.getElementById(`hand3d-status-${side}`);
@@ -1968,7 +2108,7 @@ let _templatePromise=null;
 function loadTemplate(){
   if(!_templatePromise){
     _templatePromise=new Promise((resolve,reject)=>{
-      new GLTFLoader().load('/assets/shroom_hand1.glb', g=>resolve(g.scene), undefined, reject);
+      new GLTFLoader().load('/assets/hand_model.glb', g=>resolve(g.scene), undefined, reject);
     });
   }
   return _templatePromise;
@@ -1982,7 +2122,7 @@ function buildModel(side, template){
     if(o.isMesh||o.isSkinnedMesh){ o.material=mat; o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; }
     if(o.isBone) bones[o.name]=o;
   });
-  // Right hand = left mesh mirrored on X (Shroom recipe).
+  // Right hand = left mesh mirrored on X.
   if(side==='right') hand.scale.x=-1;
   // Center + scale to fit the camera. The full hand+forearm is kept (the forearm's
   // open end stays off-frame, avoiding the hollow wrist cross-section that a clip
@@ -1996,39 +2136,24 @@ function buildModel(side, template){
   const baseOrient=new THREE.Group();
   baseOrient.add(hand);
   baseOrient.scale.setScalar(2.7/maxDim);
-  // Neutral pose = "palm toward front, fingers up" (the calibration pose). GLB rest
-  // has fingers along +Z. R_x(-90) stands fingers up (+Y); R_y(180) then turns the
-  // palm to face FRONT (away from camera) instead of toward the viewer. Defaulting
-  // here keeps the common palm-front task pose near neutral, minimizing travel on
-  // the unreliable vertical (yaw) axis.
-  const _bx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), -Math.PI/2);
-  const _by=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), Math.PI);
-  baseOrient.quaternion.copy(_by).multiply(_bx);
+  // Neutral pose = "palm flat down on a table, fingers forward" (palm-down calibration
+  // for the 6-axis IMU). GLB palm-down rest + 180 deg yaw points fingers forward (-Z,
+  // away from viewer); palm normal -Y (down), back of hand +Y (up). Paired with the
+  // raised camera below.
+  baseOrient.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0), Math.PI);
   const pivot=new THREE.Group();         // IMU orientation is applied here
   pivot.add(baseOrient);
-  // Capture each finger bone's rest-pose quaternion so applyBends can rotate
-  // relative to the rest pose rather than writing absolute Euler z — this avoids
-  // the "snap to straight" that occurs when direct rotation.z conflicts with the
-  // bone's baked GLB orientation at larger bend angles.
-  const restQuats={};
-  for(const fname in FINGER_BONES){
-    restQuats[fname]=FINGER_BONES[fname].map(bname=>
-      bones[bname]?bones[bname].quaternion.clone():new THREE.Quaternion()
-    );
-  }
-  return {pivot, baseOrient, hand, bones, side, restQuats};
+  return {pivot, baseOrient, hand, bones, side};
 }
 
 function applyBends(model, bends){
-  if(!model||!model.bones||!model.restQuats) return;
+  if(!model||!model.bones) return;
   for(const fname in FINGER_BONES){
     const v=clamp01(bends[fname]);
     const segs=FINGER_BONES[fname];
-    const rqs=model.restQuats[fname];
-    _qCurl.setFromAxisAngle(_vCurlAxis,-CURL*v);
     for(let i=0;i<segs.length;i++){
       const b=model.bones[segs[i]];
-      if(b) b.quaternion.copy(rqs[i]).multiply(_qCurl);
+      if(b) b.rotation.z=-CURL*v;
     }
   }
 }
@@ -2042,7 +2167,7 @@ function initHand(canvas, side){
   renderer.outputColorSpace=THREE.SRGBColorSpace;
   const scene=new THREE.Scene();
   const camera=new THREE.PerspectiveCamera(32, 1, 0.1, 100);
-  camera.position.set(0,0,4.6); camera.lookAt(0,0,0);
+  camera.position.set(0,3.2,3.4); camera.lookAt(0,0,0); // raised 3/4 view looking down at the palm-down hand
   scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4150, 0.5));
   scene.add(new THREE.AmbientLight(0xffffff, 0.3));
   const key=new THREE.DirectionalLight(0xffffff, 1.05); key.position.set(2.5,4,3);
@@ -2081,8 +2206,13 @@ function ensureSize(ctx){
   }
   return true;
 }
+// Orientation correction for the palm-down neutral. The IMU body-frame delta
+// (q_ref^-1 * q_raw) is conjugated by A = Rx(-90 deg) to match the screen axes;
+// without it, yaw and roll come out swapped. Determined empirically with the glove
+// (tuning result: side=body, no flips, ops=[X-], A=[-0.707,0,0,0.707]).
+const _ALIGN=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), -Math.PI/2);
+const _ALIGN_INV=_ALIGN.clone().invert();
 const _qRaw=new THREE.Quaternion(), _qRef=new THREE.Quaternion();
-const _qCurl=new THREE.Quaternion(), _vCurlAxis=new THREE.Vector3(0,0,1);
 function render(ctx, quat, bends, ref){
   ctx._last.quat=quat||null; ctx._last.bends=bends||{}; ctx._last.ref=ref||null;
   const m=ctx.model;
@@ -2090,10 +2220,12 @@ function render(ctx, quat, bends, ref){
     if(quat){
       _qRaw.set(quat.x,quat.y,quat.z,quat.w);
       if(ref){
-        // corrected = q_ref^-1 * q_raw  (THREE order x,y,z,w; decode is w,x,y,z)
+        // delta_body = q_ref^-1 * q_raw  (THREE order x,y,z,w; decode is w,x,y,z)
         _qRef.set(ref.x,ref.y,ref.z,ref.w).invert();
         _qRaw.premultiply(_qRef);
       }
+      // axis alignment: A * delta * A^-1 (reorients axes; identity stays identity)
+      _qRaw.premultiply(_ALIGN).multiply(_ALIGN_INV);
       _qRaw.normalize();
       m.pivot.quaternion.copy(_qRaw);
     }else{
@@ -2119,7 +2251,7 @@ def _required_asset_paths() -> List[Path]:
     return [
         ASSETS_DIR / "three.module.js",
         ASSETS_DIR / "GLTFLoader.js",
-        ASSETS_DIR / "shroom_hand1.glb",
+        ASSETS_DIR / "hand_model.glb",
         ASSETS_DIR / "utils" / "SkeletonUtils.js",
         ASSETS_DIR / "utils" / "BufferGeometryUtils.js",
     ]
@@ -2128,16 +2260,25 @@ def _required_asset_paths() -> List[Path]:
 def _fix_malformed_assets() -> bool:
     """Repair Windows-zip paths where backslashes became part of filenames."""
     fixed = False
-    for bad in _HERE.glob("assets\\*"):
-        rel = str(bad.relative_to(_HERE)).replace("\\", "/")
+    # Malformed zips sometimes extract "assets\\file.js" as one filename at package root.
+    for bad in _HERE.iterdir():
+        rel = bad.name.replace("\\", "/")
+        if "/" not in rel or not rel.startswith("assets/"):
+            continue
         target = _HERE / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target.resolve() == bad.resolve():
+            continue
         if not target.exists():
             bad.rename(target)
             fixed = True
-        elif bad.is_file():
-            bad.unlink()
-            fixed = True
+    current = ASSETS_DIR / "hand_model.glb"
+    if not current.is_file():
+        for alt in sorted(ASSETS_DIR.glob("*.glb")):
+            if alt.name != current.name:
+                alt.rename(current)
+                fixed = True
+                break
     return fixed
 
 
@@ -2149,7 +2290,7 @@ def _check_assets() -> None:
         print("[viewer] WARNING: missing bundled 3D assets — the hand model will not load:")
         for p in missing:
             print(f"          {p.relative_to(_HERE)}")
-        print("[viewer] Re-copy the full tactile-glove-demo-macos folder from the release zip.")
+        print("[viewer] Re-copy the full tactile-glove-demo-windows folder from the release zip.")
 
 
 def parse_args() -> argparse.Namespace:

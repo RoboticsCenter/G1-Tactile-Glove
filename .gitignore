@@ -1,6 +1,14 @@
+# Python virtual environments (recreated by the launchers)
 .venv/
+
+# Python caches
 __pycache__/
 *.pyc
+
+# OS / editor cruft
 .DS_Store
-calibration/*.json
-recordings/*.json
+.Rhistory
+
+# User data: saved recordings (JSON + CSV)
+**/recordings/*
+!**/recordings/.keep

@@ -1,46 +1,54 @@
 #!/usr/bin/env python3
-"""Probe COM/serial ports for Tactile Glove (Juqiao AA 55 03 99) data."""
+"""Probe COM/serial ports for Tactile Glove (AA 55 03 99) data."""
 
 from __future__ import annotations
 
 import sys
 import time
-from pathlib import Path
 
 import serial
 from serial.tools import list_ports
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bt_dongle import looks_like_bt_binary_flood, try_at_bridge  # noqa: E402
-from linker_glove_agent import FrameParser, GLOVE_SENSOR_TYPE  # noqa: E402
+from linker_glove_agent import FrameParser, GLOVE_SENSOR_TYPE
 
 BAUD = 921600
 PROBE_SEC = 2.0
 
 
-def probe_port(port: str, probe_sec: float = PROBE_SEC) -> dict:
+def probe_port(port: str, probe_sec: float = PROBE_SEC, early_frames: int = 3) -> dict:
     parser = FrameParser()
     left = right = 0
     err = ""
     try:
         ser = serial.Serial(port, BAUD, timeout=0.05)
     except Exception as exc:
-        # opened=False distinguishes "busy/held by another app" from "opened, no glove data".
-        return {"port": port, "ok": False, "opened": False, "frames": 0, "left": 0, "right": 0, "side": "none", "error": str(exc)}
+        return {
+            "port": port,
+            "ok": False,
+            "opened": False,
+            "frames": 0,
+            "left": 0,
+            "right": 0,
+            "side": "none",
+            "error": str(exc),
+        }
     t0 = time.time()
-    sample = bytearray()
     try:
         while time.time() - t0 < probe_sec:
             chunk = ser.read(4096)
             if not chunk:
                 continue
-            sample.extend(chunk)
             for frame in parser.feed(chunk):
                 st = int(frame["sensor_type"])
                 if st == GLOVE_SENSOR_TYPE["left"]:
                     left += 1
                 elif st == GLOVE_SENSOR_TYPE["right"]:
                     right += 1
+            # Early-exit: a streaming glove shows up within a few frames, so stop as
+            # soon as we're confident instead of listening the whole window. This is
+            # the main hot-plug latency win (~0.1s vs the full probe_sec timeout).
+            if left + right >= early_frames:
+                break
     except Exception as exc:
         err = str(exc)
     finally:
@@ -53,7 +61,7 @@ def probe_port(port: str, probe_sec: float = PROBE_SEC) -> dict:
         side = "right"
     elif left and right:
         side = "both"
-    out = {
+    return {
         "port": port,
         "ok": total > 0,
         "opened": True,
@@ -63,18 +71,6 @@ def probe_port(port: str, probe_sec: float = PROBE_SEC) -> dict:
         "side": side,
         "error": err,
     }
-    # BT receiver dongle: RF may show "connected" on LEDs while the USB serial port
-    # still streams a proprietary binary format until AT+SCAN / AT+CONN (spec §6.3).
-    if total == 0 and not err and looks_like_bt_binary_flood(bytes(sample)):
-            bridged = try_at_bridge(port, listen_sec=max(2.0, probe_sec))
-            if bridged.get("ok"):
-                return bridged
-            out["mode"] = "bt_dongle"
-            out["binary_flood"] = True
-            out["error"] = bridged.get("error") or (
-                "BT dongle detected but not streaming Juqiao AA550399 yet."
-            )
-    return out
 
 
 def main() -> None:

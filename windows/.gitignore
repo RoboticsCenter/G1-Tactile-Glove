@@ -1,0 +1,14 @@
+# Python virtual environment (recreated by run_linux.sh)
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# macOS / editor cruft
+.DS_Store
+.Rhistory
+
+# Saved recordings (JSON + CSV) and local calibration are user data
+recordings/*
+!recordings/.keep

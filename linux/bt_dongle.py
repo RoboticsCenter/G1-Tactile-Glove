@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Bluetooth receiver dongle helpers for Juqiao tactile gloves.
+"""Bluetooth receiver dongle helpers for tactile gloves (Linux/cross-platform).
 
-Per JQ spec v1.2 section 6.3 the PC-side BT receiver exposes a USB serial port.
-After RF pairing (solid blue on glove, red+blue on dongle) the host must still
-bridge the dongle to Juqiao frames (AA 55 03 99) using AT commands:
+Per the glove BT spec the PC-side receiver exposes a USB serial port. After RF
+pairing (solid blue on glove, red+blue on dongle) the host must still bridge the
+dongle to glove frames (AA 55 03 99) using AT commands:
 
-  AT+SCAN=1          -> list JQ-LH / JQ-RH devices
+  AT+SCAN=1        -> list JQ-LH / JQ-RH devices
   AT+CONN=<addr>   -> start streaming sensor data @ 921600
 
-USB gloves stream Juqiao frames directly. A BT dongle often floods the port with
-a proprietary 0x81 0x10 framed binary stream until AT+CONN succeeds.
+USB gloves stream frames directly. A BT dongle often floods the port with a
+proprietary 0x81 0x10 framed binary stream until AT+CONN succeeds.
+
+This module is plain pyserial + AT text, so it works identically on Linux,
+macOS, and Windows; only the serial device name differs (Linux: /dev/ttyACM*,
+/dev/ttyUSB*, /dev/rfcomm*).
 """
 
 from __future__ import annotations
@@ -29,12 +33,12 @@ ADDR_RE = re.compile(r"\b([0-9A-Fa-f]{10,12})\b")
 
 
 def looks_like_bt_binary_flood(chunk: bytes) -> bool:
-    """Heuristic: dongle passthrough mode (not Juqiao AA550399)."""
+    """Heuristic: dongle passthrough mode (not glove AA550399 frames)."""
     if not chunk or HEADER in chunk:
         return False
     if chunk.count(b"\x81\x10") >= 2:
         return True
-    # Many 0x80 padding bytes with high throughput but no Juqiao header.
+    # Many 0x80 padding bytes with high throughput but no glove header.
     if len(chunk) >= 512 and chunk.count(0x80) > len(chunk) * 0.55:
         return True
     return False
@@ -72,7 +76,7 @@ def _find_jq_addresses(lines: List[str]) -> List[Tuple[str, str]]:
     return hits
 
 
-def _count_juqiao_frames(raw: bytes) -> Tuple[int, int, int, str]:
+def _count_glove_frames(raw: bytes) -> Tuple[int, int, int, str]:
     parser = FrameParser()
     left = right = 0
     for frame in parser.feed(raw):
@@ -134,16 +138,16 @@ def try_at_bridge(
             raw = scan_raw
             if looks_like_bt_binary_flood(raw):
                 err = (
-                    "BT dongle is streaming proprietary binary (0x81 0x10 frames), not Juqiao AA550399. "
+                    "BT dongle is streaming proprietary binary (0x81 0x10 frames), not glove AA550399. "
                     "Replug the dongle (red LED flashing), close the vendor Companion app, then retry within "
                     "a few seconds so AT+SCAN=1 can run before RF auto-connects."
                 )
             elif lines:
                 err = f"AT replied but no JQ-LH/JQ-RH address found. Lines: {lines[:6]}"
             else:
-                err = "No AT text response and no Juqiao frames."
+                err = "No AT text response and no glove frames."
 
-        total, left, right, side_out = _count_juqiao_frames(raw)
+        total, left, right, side_out = _count_glove_frames(raw)
         if side_out == "none" and chosen and chosen[0] in ("left", "right"):
             side_out = chosen[0]
 
@@ -178,12 +182,12 @@ def diagnose_port(port: str, sample_sec: float = 2.0) -> dict:
     try:
         ser.reset_input_buffer()
         raw = _read_for(ser, sample_sec)
-        total, left, right, _ = _count_juqiao_frames(raw)
+        total, left, right, _ = _count_glove_frames(raw)
         info.update(
             {
                 "opened": True,
                 "bytes": len(raw),
-                "juqiao_frames": total,
+                "glove_frames": total,
                 "left": left,
                 "right": right,
                 "has_aa550399": HEADER in raw,

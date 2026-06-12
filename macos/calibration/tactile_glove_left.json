@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "calibrated_at": 1781223569.6396868,
+  "capture": {
+    "open": true,
+    "closed": true
+  },
+  "fingers": {
+    "thumb": {
+      "gain": 1,
+      "offset": 0,
+      "open_raw": 0,
+      "closed_raw": 95.37
+    },
+    "index": {
+      "gain": 1,
+      "offset": 0,
+      "open_raw": 55.998,
+      "closed_raw": 135.609
+    },
+    "middle": {
+      "gain": 1,
+      "offset": 0,
+      "open_raw": 75.531,
+      "closed_raw": 139.485
+    },
+    "ring": {
+      "gain": 1,
+      "offset": 0,
+      "open_raw": 32.4615,
+      "closed_raw": 141.576
+    },
+    "little": {
+      "gain": 1,
+      "offset": 0,
+      "open_raw": 0,
+      "closed_raw": 74.766
+    }
+  },
+  "imu_ref": [
+    0.8400754304607748,
+    0.043081618033622135,
+    0.11102707689816847,
+    -0.5292355180061116
+  ]
+}

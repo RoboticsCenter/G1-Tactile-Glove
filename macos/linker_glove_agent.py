@@ -4,7 +4,7 @@
 Modular glove -> Teleop websocket agent.
 
 Sources:
-- juqiao_serial: Juqiao serial protocol (AA 55 03 99)
+- glove_serial: Tactile glove serial protocol (AA 55 03 99)
 - wuji_jsonl: JSON line stream from Wuji SDK bridge script
 """
 
@@ -265,7 +265,7 @@ class SharedState:
     joint_actual_position_5x4: List[List[float]] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def update_from_juqiao(self, sensor_type: int, sensor: List[int], imu: List[int]) -> None:
+    async def update_from_glove_serial(self, sensor_type: int, sensor: List[int], imu: List[int]) -> None:
         async with self.lock:
             if self.glove_side == "auto":
                 if sensor_type == 0x01:
@@ -287,14 +287,6 @@ class SharedState:
                 pressure[region] = (sum(vals) / len(vals)) if vals else 0.0
             raw = list(sensor[:256])
             mat16 = matrix_from_flat([float(v) for v in raw], 16, 16, 0.0)
-            # Fingertip sensors appear at both ends of the flat array (hardware
-            # PCB wraps around the hand). Merge rows 14-15 into rows 0-1 so
-            # fingertip pressure shows only at the top of the grid.
-            for _c in range(16):
-                mat16[0][_c] = max(mat16[0][_c], mat16[14][_c])
-                mat16[1][_c] = max(mat16[1][_c], mat16[15][_c])
-            mat16[14] = [0.0] * 16
-            mat16[15] = [0.0] * 16
             self.detected_side = side
             self.bends = bends
             self.pressure = pressure
@@ -373,7 +365,7 @@ class SharedState:
             }
 
 
-async def juqiao_serial_reader_task(args: argparse.Namespace, state: SharedState) -> None:
+async def glove_serial_reader_task(args: argparse.Namespace, state: SharedState) -> None:
     import serial
 
     parser = FrameParser()
@@ -383,7 +375,7 @@ async def juqiao_serial_reader_task(args: argparse.Namespace, state: SharedState
         try:
             if ser is None:
                 if not args.serial:
-                    raise RuntimeError("--serial is required when --source=juqiao_serial")
+                    raise RuntimeError("--serial is required when --source=glove_serial")
                 ser = serial.Serial(args.serial, args.baudrate, timeout=0.05)
                 print(f"[glove-agent] serial open: {args.serial} @ {args.baudrate}")
             chunk = ser.read(4096)
@@ -393,7 +385,7 @@ async def juqiao_serial_reader_task(args: argparse.Namespace, state: SharedState
             frames = parser.feed(chunk)
             if frames:
                 f = frames[-1]
-                await state.update_from_juqiao(int(f["sensor_type"]), f["sensor"], f["imu"])
+                await state.update_from_glove_serial(int(f["sensor_type"]), f["sensor"], f["imu"])
             await asyncio.sleep(0)
         except Exception as exc:
             # Some USB-serial adapters intermittently raise this error while the stream is still valid.
@@ -458,10 +450,10 @@ async def wuji_jsonl_reader_task(args: argparse.Namespace, state: SharedState) -
 
 async def run_agent(args: argparse.Namespace) -> None:
     ws_url = args.backend.rstrip("/") + "/api/teleop/ws"
-    model_name = "juqiao_glove" if args.source == "juqiao_serial" else "wuji_glove"
+    model_name = "tactile_glove" if args.source == "glove_serial" else "wuji_glove"
     state = SharedState(source=args.source, glove_side=args.glove, model_name=model_name)
-    if args.source == "juqiao_serial":
-        asyncio.create_task(juqiao_serial_reader_task(args, state))
+    if args.source == "glove_serial":
+        asyncio.create_task(glove_serial_reader_task(args, state))
     else:
         asyncio.create_task(wuji_jsonl_reader_task(args, state))
     print(f"[glove-agent] connect {ws_url} session={args.session} node={args.node_id} source={args.source}")
@@ -628,9 +620,9 @@ def main() -> None:
     parser.add_argument("--backend", default="ws://127.0.0.1:8000")
     parser.add_argument("--session", required=True)
     parser.add_argument("--node-id", default="glove-node")
-    parser.add_argument("--source", choices=["juqiao_serial", "wuji_jsonl"], default="juqiao_serial")
+    parser.add_argument("--source", choices=["glove_serial", "wuji_jsonl"], default="glove_serial")
     parser.add_argument("--device-kind", choices=["glove", "wuji_hand"], default="glove")
-    parser.add_argument("--serial", default="", help="required for juqiao_serial, e.g. /dev/ttyACM0")
+    parser.add_argument("--serial", default="", help="required for glove_serial, e.g. /dev/ttyACM0")
     parser.add_argument("--baudrate", type=int, default=921600)
     parser.add_argument("--glove", choices=["left", "right", "auto"], default="auto")
     parser.add_argument("--telemetry-hz", type=float, default=12.0)
